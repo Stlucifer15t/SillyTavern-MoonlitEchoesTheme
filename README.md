@@ -108,7 +108,7 @@ However, the Moonlit Echoes theme preset is fundamentally separate from SillyTav
 ## FAQ
 
 ### Q: The chat feels laggy while scrolling or while a reply streams in?
-**A:** Turn on **Performance Mode (Low-end Devices)** under *Advanced Settings* in the theme panel.
+**A:** Turn on **Performance Mode (Low-end Devices)** — open the theme's settings, go to the **Core Settings** tab, expand **Theme Extras**, and enable it.
 
 Blur effects look great on a desktop GPU, but on a low-end phone they are the dominant cost: the backdrop behind the chat has to be re-blurred on every scroll frame, and each blurred message is its own compositing layer. Performance Mode drops the full-viewport backdrop blur, the background image blur, the per-message blur and shadows, and the transitions on elements that change while streaming.
 
