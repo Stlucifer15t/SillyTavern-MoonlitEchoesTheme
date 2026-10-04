@@ -273,82 +273,88 @@ function ensureMessageClickHandlers() {
     messageClickHandlersInitialized = true;
 }
 
+/**
+ * Message interactions are delegated from the document. The previous version
+ * attached a click and a dblclick listener to every `.mes` present at startup,
+ * which leaked listeners, never covered messages added later, and walked the
+ * whole stale message list on each click.
+ */
+let openDetailsMessage = null;
+
+const DETAILS_SELECTORS = '.ch_name, .mesIDDisplay, .mes_timer, .tokenCounterDisplay, .mes_reasoning_details';
+const ACTIVE_MESSAGE_EXCLUSIONS = '.mesIDDisplay, .mes_timer, .tokenCounterDisplay';
+const ACTION_BUTTON_SELECTORS = '.extraMesButtonsHint, .mes_edit, .mes_edit_buttons';
+
+function onDocumentClick(event) {
+    const target = event.target;
+    if (!target?.closest) return;
+
+    // A tracked message may have been removed from the chat since the click.
+    if (openDetailsMessage && !openDetailsMessage.isConnected) {
+        openDetailsMessage = null;
+    }
+
+    const messageElement = target.closest('.mes');
+
+    if (!messageElement) {
+        if (openDetailsMessage) {
+            openDetailsMessage.classList.remove('show-details');
+            openDetailsMessage = null;
+        }
+        // Messages stay independently highlightable; only an outside click
+        // clears them all, so this selector runs at most once per click.
+        document.querySelectorAll('.mes.active-message').forEach((message) => {
+            message.classList.remove('active-message');
+        });
+        return;
+    }
+
+    // --- Details toggle -------------------------------------------------
+    if (!target.closest(DETAILS_SELECTORS)) {
+        const shouldOpen = !messageElement.classList.contains('show-details');
+
+        if (openDetailsMessage && openDetailsMessage !== messageElement) {
+            openDetailsMessage.classList.remove('show-details');
+        }
+
+        messageElement.classList.toggle('show-details', shouldOpen);
+        openDetailsMessage = shouldOpen ? messageElement : null;
+    }
+
+    // --- Active message toggle ------------------------------------------
+    const isMessageActionButton = target.closest(ACTION_BUTTON_SELECTORS);
+
+    if (target.tagName === 'A' || target.tagName === 'BUTTON' || isMessageActionButton) {
+        if (isMessageActionButton) {
+            messageElement.classList.add('active-message');
+        }
+        return;
+    }
+
+    if (!target.closest(ACTIVE_MESSAGE_EXCLUSIONS)) {
+        messageElement.classList.toggle('active-message');
+    }
+}
+
+function onDocumentDoubleClick(event) {
+    const messageElement = event.target?.closest?.('.mes');
+    if (!messageElement) return;
+
+    event.preventDefault();
+    messageElement.classList.remove('show-details');
+    if (openDetailsMessage === messageElement) {
+        openDetailsMessage = null;
+    }
+}
+
 function initMessageDetailsSystem() {
-    const messageElements = document.querySelectorAll('.mes');
-
-    messageElements.forEach((message) => {
-        message.addEventListener('click', function onMessageClick(event) {
-            const isClickInsideDetails =
-                event.target.closest('.ch_name') ||
-                event.target.closest('.mesIDDisplay') ||
-                event.target.closest('.mes_timer') ||
-                event.target.closest('.tokenCounterDisplay') ||
-                event.target.closest('.mes_reasoning_details');
-
-            if (!isClickInsideDetails) {
-                this.classList.toggle('show-details');
-
-                if (this.classList.contains('show-details')) {
-                    messageElements.forEach((otherMessage) => {
-                        if (otherMessage !== this) {
-                            otherMessage.classList.remove('show-details');
-                        }
-                    });
-                }
-            }
-        });
-
-        message.addEventListener('dblclick', function onMessageDoubleClick(event) {
-            event.preventDefault();
-            this.classList.remove('show-details');
-        });
-    });
-
-    document.addEventListener('click', onDocumentClickForMessageDetails);
+    document.addEventListener('click', onDocumentClick);
 }
 
 function initMessageClickHandlers() {
-    document.addEventListener('click', onDocumentClickForMessageToggles);
+    document.addEventListener('dblclick', onDocumentDoubleClick);
 }
 
-function onDocumentClickForMessageDetails(event) {
-    if (!event.target.closest('.mes')) {
-        document.querySelectorAll('.mes.show-details').forEach((message) => {
-            message.classList.remove('show-details');
-        });
-    }
-}
-
-function onDocumentClickForMessageToggles(event) {
-    const messageElement = event.target.closest('.mes');
-
-    if (messageElement) {
-        const isClickInsideDetails =
-            event.target.closest('.mesIDDisplay') ||
-            event.target.closest('.mes_timer') ||
-            event.target.closest('.tokenCounterDisplay');
-
-        const isMessageActionButton =
-            event.target.closest('.extraMesButtonsHint') ||
-            event.target.closest('.mes_edit') ||
-            event.target.closest('.mes_edit_buttons');
-
-        if (event.target.tagName === 'A' || event.target.tagName === 'BUTTON' || isMessageActionButton) {
-            if (isMessageActionButton) {
-                messageElement.classList.add('active-message');
-            }
-            return;
-        }
-
-        if (!isClickInsideDetails) {
-            messageElement.classList.toggle('active-message');
-        }
-    } else {
-        document.querySelectorAll('.mes.active-message').forEach((activeMessage) => {
-            activeMessage.classList.remove('active-message');
-        });
-    }
-}
 
 function updateSidebarButtonState() {
     const $button = $('#moonlit_sidebar_button');

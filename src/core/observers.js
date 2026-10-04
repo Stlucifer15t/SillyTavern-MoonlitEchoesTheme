@@ -76,6 +76,14 @@ function formatSrcsetUrl(url) {
     }
 }
 
+/**
+ * Remembers what has already been written to each message element so repeated
+ * passes are no-ops. Keyed by message element, valued by the resolved avatar
+ * signature. A WeakMap means unloaded chats are garbage collected normally.
+ * @type {WeakMap<Element, string>}
+ */
+const appliedAvatarSignatures = new WeakMap();
+
 function applyAvatarSources(mes, avatarImg, preferOriginal) {
     const srcCandidate = avatarImg.getAttribute('src') || avatarImg.getAttribute('data-src');
     if (!srcCandidate) return;
@@ -87,11 +95,12 @@ function applyAvatarSources(mes, avatarImg, preferOriginal) {
     const originalUrl = original || thumbUrl;
     const targetUrl = preferOriginal ? originalUrl : thumbUrl;
 
-    mes.dataset.avatarThumb = thumbUrl;
-    mes.dataset.avatarOriginal = originalUrl;
-    mes.dataset.avatar = targetUrl;
+    // Signature is derived from the *computed* urls, so rewriting <img src> to
+    // the thumbnail below cannot cause the next pass to see it as a change.
+    const signature = `${preferOriginal ? 'o' : 't'}|${originalUrl}|${targetUrl}`;
+    if (appliedAvatarSignatures.get(mes) === signature) return;
 
-    mes.style.setProperty('--mes-avatar-thumb-url', `url('${thumbUrl}')`);
+    // Only the two variables actually consumed by the stylesheets are written.
     mes.style.setProperty('--mes-avatar-original-url', `url('${originalUrl}')`);
     mes.style.setProperty('--mes-avatar-url', `url('${targetUrl}')`);
 
@@ -106,22 +115,33 @@ function applyAvatarSources(mes, avatarImg, preferOriginal) {
     } else {
         avatarImg.removeAttribute('srcset');
     }
+
+    appliedAvatarSignatures.set(mes, signature);
+}
+
+function resolvePreferOriginal() {
+    const context = SillyTavern.getContext();
+    const settings = getExtensionSettings(context) || {};
+    return (
+        settings.useOriginalAvatarImages === true ||
+        document.body.classList.contains('ripplestyle')
+    );
 }
 
 /**
  * Initialize avatar injector observer.
  * Injects avatar URLs into message elements so they can be used in CSS.
- * @returns {function} Function to manually trigger avatar updates.
+ *
+ * Only messages that actually changed are re-processed: during streaming
+ * SillyTavern mutates the last message on every token, and rescanning the whole
+ * chat each time cost hundreds of style writes per token on long chats.
+ * @returns {function} Function to manually trigger a full avatar refresh.
  */
 export function initAvatarInjector() {
     function updateAvatars() {
-        const context = SillyTavern.getContext();
-        const settings = getExtensionSettings(context) || {};
-        const preferOriginal =
-            settings.useOriginalAvatarImages === true ||
-            document.body.classList.contains('ripplestyle');
+        const preferOriginal = resolvePreferOriginal();
 
-        document.querySelectorAll('.mes').forEach((mes) => {
+        document.querySelectorAll('#chat .mes').forEach((mes) => {
             const avatarImg = mes.querySelector('.avatar img');
             if (!avatarImg) return;
 
@@ -129,19 +149,79 @@ export function initAvatarInjector() {
         });
     }
 
-    updateAvatars();
+    /**
+     * Collect the messages touched by a mutation batch. Text-only edits inside
+     * a message body (the streaming case) resolve to nothing here, which is
+     * what keeps the observer cheap.
+     * @param {MutationRecord[]} mutations
+     * @param {Set<Element>} out
+     */
+    function collectAffectedMessages(mutations, out) {
+        for (const mutation of mutations) {
+            if (mutation.type === 'attributes') {
+                const target = mutation.target;
+                if (target.nodeType !== 1) continue;
+                const mes = target.closest?.('.mes');
+                if (mes) out.add(mes);
+                continue;
+            }
 
-    let debounceTimer;
-    const observerCallback = () => {
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(updateAvatars, 100);
+            for (const node of mutation.addedNodes) {
+                if (node.nodeType !== 1) continue;
+                if (node.classList.contains('mes')) {
+                    out.add(node);
+                } else if (node.querySelector) {
+                    node.querySelectorAll('.mes').forEach((mes) => out.add(mes));
+                }
+            }
+        }
+    }
+
+    const pendingMessages = new Set();
+    let flushScheduled = false;
+
+    function flushPending() {
+        flushScheduled = false;
+        if (pendingMessages.size === 0) return;
+
+        const preferOriginal = resolvePreferOriginal();
+        const targets = [...pendingMessages];
+        pendingMessages.clear();
+
+        // Messages removed from the document no longer need styling.
+        for (const mes of targets) {
+            if (!mes.isConnected) continue;
+            const avatarImg = mes.querySelector('.avatar img');
+            if (!avatarImg) continue;
+            applyAvatarSources(mes, avatarImg, preferOriginal);
+        }
+    }
+
+    function scheduleFlush() {
+        if (flushScheduled) return;
+        flushScheduled = true;
+        setTimeout(flushPending, 100);
+    }
+
+    const observerCallback = (mutations) => {
+        collectAffectedMessages(mutations, pendingMessages);
+        // Nothing relevant changed (e.g. streamed text) — skip scheduling.
+        if (pendingMessages.size === 0) return;
+        scheduleFlush();
     };
 
     const chatContainer = document.getElementById('chat');
     if (chatContainer) {
         const observer = new MutationObserver(observerCallback);
-        observer.observe(chatContainer, { childList: true, subtree: true });
+        observer.observe(chatContainer, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'data-src'],
+        });
     }
+
+    updateAvatars();
 
     window.updateAvatars = updateAvatars;
     return updateAvatars;
@@ -149,182 +229,142 @@ export function initAvatarInjector() {
 
 /**
  * Initialize monitoring of #form_sheld height and expose helper controls.
+ *
+ * The previous implementation watched the whole document subtree for added
+ * nodes and ran three forced layouts per keystroke. This version keeps a single
+ * narrow observer on the form's parent and coalesces every measurement into one
+ * animation frame.
  * @returns {{update: function, start: function, stop: function}} Control helpers.
  */
 export function initFormSheldHeightMonitor() {
-    let isInitialized = false;
+    let observedFormSheld = null;
+    let updateScheduled = false;
+    let restartScheduled = false;
+    let lastHeight = -1;
 
-    function getAccurateHeight(element) {
-        if (!element) return 0;
-        const rect = element.getBoundingClientRect();
-        return rect.height;
+    function writeHeight(height) {
+        // A custom property on <html> invalidates style for the whole document,
+        // so skip the write whenever the measured height has not changed.
+        if (height <= 0 || height === lastHeight) return;
+        lastHeight = height;
+        document.documentElement.style.setProperty('--formSheldHeight', `${height}px`);
     }
 
     function updateFormSheldHeight() {
         const formSheld = document.getElementById('form_sheld');
-        if (formSheld) {
-            const height = getAccurateHeight(formSheld);
-            if (height > 0) {
-                document.documentElement.style.setProperty('--formSheldHeight', `${height}px`);
-                isInitialized = true;
-            }
+        if (!formSheld) return;
+        writeHeight(formSheld.getBoundingClientRect().height);
+    }
+
+    /** Coalesce all height refresh requests into a single pre-paint pass. */
+    function scheduleUpdate() {
+        if (updateScheduled) return;
+        updateScheduled = true;
+
+        const run = () => {
+            updateScheduled = false;
+            updateFormSheldHeight();
+        };
+
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(run);
+        } else {
+            setTimeout(run, 16);
         }
     }
 
-    const mutationObserver = new MutationObserver((mutations) => {
-        let shouldUpdate = false;
-
-        for (const mutation of mutations) {
-            if (mutation.target.id === 'form_sheld' || mutation.target.closest?.('#form_sheld')) {
-                shouldUpdate = true;
-                break;
-            }
-
-            if (mutation.addedNodes.length) {
-                for (const node of mutation.addedNodes) {
-                    if (
-                        node.id === 'form_sheld' ||
-                        (node.nodeType === 1 && node.querySelector && node.querySelector('#form_sheld'))
-                    ) {
-                        shouldUpdate = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (shouldUpdate) {
-            setTimeout(updateFormSheldHeight, 0);
-        }
-    });
+    function scheduleRestart() {
+        if (restartScheduled) return;
+        restartScheduled = true;
+        setTimeout(() => {
+            restartScheduled = false;
+            startObservers();
+        }, 50);
+    }
 
     const resizeObserver = new ResizeObserver((entries) => {
         for (const entry of entries) {
-            if (entry.target.id === 'form_sheld') {
-                const { height } = entry.contentRect;
-                if (height > 0) {
-                    document.documentElement.style.setProperty('--formSheldHeight', `${height}px`);
-                    isInitialized = true;
-                }
+            if (entry.target === observedFormSheld) {
+                writeHeight(entry.contentRect.height);
             }
+        }
+    });
+
+    // Watches only the form's direct children, so the chat stream above it
+    // never triggers this callback.
+    const parentObserver = new MutationObserver(() => {
+        const current = document.getElementById('form_sheld');
+        if (current !== observedFormSheld) {
+            scheduleRestart();
         }
     });
 
     function stopObservers() {
         resizeObserver.disconnect();
-        mutationObserver.disconnect();
+        parentObserver.disconnect();
+        observedFormSheld = null;
     }
 
     function startObservers() {
-        stopObservers();
-
         const formSheld = document.getElementById('form_sheld');
-        if (formSheld) {
-            resizeObserver.observe(formSheld);
-            mutationObserver.observe(formSheld, {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                characterData: true,
-            });
-
-            const parent = formSheld.parentElement;
-            if (parent) {
-                mutationObserver.observe(parent, {
-                    attributes: true,
-                    attributeFilter: ['style', 'class'],
-                });
-            }
-
+        if (!formSheld) return;
+        if (formSheld === observedFormSheld) {
             updateFormSheldHeight();
-        }
-    }
-
-    const bodyObserver = new MutationObserver((mutations) => {
-        for (const mutation of mutations) {
-            if (mutation.addedNodes.length) {
-                for (const node of mutation.addedNodes) {
-                    if (
-                        node.id === 'form_sheld' ||
-                        (node.nodeType === 1 && node.querySelector && node.querySelector('#form_sheld'))
-                    ) {
-                        setTimeout(startObservers, 50);
-                        return;
-                    }
-                }
-            }
+            return;
         }
 
-        const formSheld = document.getElementById('form_sheld');
-        if (formSheld && !isInitialized) {
-            setTimeout(startObservers, 50);
-        }
-    });
+        stopObservers();
+        observedFormSheld = formSheld;
 
-    function onTextAreaInput() {
+        resizeObserver.observe(formSheld);
+
+        const parent = formSheld.parentElement;
+        if (parent) {
+            parentObserver.observe(parent, { childList: true });
+        }
+
         updateFormSheldHeight();
-        setTimeout(updateFormSheldHeight, 10);
-        setTimeout(updateFormSheldHeight, 100);
     }
 
-    function setupTextAreaListener() {
+    function setupListeners() {
         const textArea = document.getElementById('send_textarea');
         if (textArea) {
-            textArea.removeEventListener('input', onTextAreaInput);
-            textArea.addEventListener('input', onTextAreaInput);
+            textArea.removeEventListener('input', scheduleUpdate);
+            textArea.addEventListener('input', scheduleUpdate);
         }
-    }
 
-    window.addEventListener('resize', updateFormSheldHeight);
-    window.addEventListener('orientationchange', () => {
-        updateFormSheldHeight();
-        setTimeout(updateFormSheldHeight, 100);
-        setTimeout(updateFormSheldHeight, 500);
-    });
-
-    document.addEventListener('DOMContentLoaded', () => {
-        startObservers();
-        setupTextAreaListener();
-        updateFormSheldHeight();
-        setTimeout(updateFormSheldHeight, 100);
-        setTimeout(updateFormSheldHeight, 500);
-        setTimeout(updateFormSheldHeight, 1000);
-    });
-
-    window.addEventListener('load', () => {
-        startObservers();
-        setupTextAreaListener();
-        updateFormSheldHeight();
-        setTimeout(updateFormSheldHeight, 500);
-    });
-
-    function setupUIListeners() {
-        document.querySelectorAll('#qr--bar .qr--option').forEach((button) => {
-            button.addEventListener('click', () => {
-                setTimeout(updateFormSheldHeight, 10);
-                setTimeout(updateFormSheldHeight, 100);
-            });
+        document.querySelectorAll('#qr--bar .qr--option, #options_button').forEach((button) => {
+            button.removeEventListener('click', scheduleUpdate);
+            button.addEventListener('click', scheduleUpdate);
         });
-
-        const optionsButton = document.getElementById('options_button');
-        if (optionsButton) {
-            optionsButton.addEventListener('click', () => {
-                setTimeout(updateFormSheldHeight, 10);
-                setTimeout(updateFormSheldHeight, 100);
-            });
-        }
     }
 
-    setTimeout(setupUIListeners, 1000);
-
-    bodyObserver.observe(document.body, {
-        childList: true,
-        subtree: true,
+    window.addEventListener('resize', scheduleUpdate);
+    window.addEventListener('orientationchange', () => {
+        scheduleUpdate();
+        // The viewport can still be settling after the orientation swap.
+        setTimeout(scheduleUpdate, 300);
     });
 
-    startObservers();
-    setupTextAreaListener();
-    updateFormSheldHeight();
+    if (document.readyState === 'loading') {
+        document.addEventListener(
+            'DOMContentLoaded',
+            () => {
+                startObservers();
+                setupListeners();
+                scheduleUpdate();
+                setTimeout(scheduleUpdate, 500);
+            },
+            { once: true },
+        );
+    } else {
+        startObservers();
+        setupListeners();
+        scheduleUpdate();
+    }
+
+    // Quick Reply bars can mount well after the initial pass.
+    setTimeout(setupListeners, 1000);
 
     return {
         update: updateFormSheldHeight,

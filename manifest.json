@@ -6,7 +6,7 @@
     "optional": [],
     "js": "index.js",
     "author": "Rivelle <rivelle.days@gmail.com>",
-    "version": "3.1.1",
+    "version": "3.1.2",
     "license": "AGPL-3.0",
     "homepage": "https://github.com/RivelleDays/SillyTavern-MoonlitEchoesTheme",
     "auto_update": true,

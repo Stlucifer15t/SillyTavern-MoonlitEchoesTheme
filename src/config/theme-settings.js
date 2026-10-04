@@ -279,6 +279,79 @@ export const themeCustomSettings = [
         `
     },
     {
+        "type": "checkbox",
+        "varId": "performanceMode",
+        "displayText": t`Performance Mode (Low-end Devices)`,
+        "default": false,
+        "category": "theme-extras",
+        "description": t`Turn on if scrolling or streaming feels laggy. Disables backdrop blur, background blur, and per-message shadows — the effects that cost the most on weak mobile GPUs.`,
+        "cssBlock": `
+            /* ============================================================
+               Performance Mode
+               Each rule below removes a paint or compositing cost that the
+               GPU has to redo while the chat scrolls or streams.
+               ============================================================ */
+
+            /* Backdrop blur covering the whole chat viewport — re-blurred on
+               every scroll frame because the background behind it moves. */
+            body #sheld::before {
+                backdrop-filter: none !important;
+                -webkit-backdrop-filter: none !important;
+            }
+
+            /* Full-screen blurred background image. A blur radius of 0 still
+               costs a filter pass, so drop the filter entirely. */
+            body #bg1,
+            body #bg_custom {
+                filter: none !important;
+            }
+
+            /* Per-message blurred layers. One backdrop-blur per visible
+               message is the single most expensive thing on the chat list.
+               The #sheld #chat ancestor chain is deliberate: some chat-style
+               rules are scoped like "body.whisperstyle #chat .mes .mes_block
+               !important", so two ids are needed to out-weigh them. */
+            #sheld #chat .mes .mes_text,
+            #sheld #chat .mes .mes_block {
+                backdrop-filter: none !important;
+                -webkit-backdrop-filter: none !important;
+                box-shadow: none !important;
+            }
+
+            /* Drop-shadow filters on the per-message action buttons — every
+               message carries a row of them. */
+            #sheld #chat .mes .mes_button,
+            #sheld #chat .mes .extraMesButtons > div,
+            #sheld #chat .mes .mes_edit_buttons {
+                filter: none !important;
+            }
+
+            /* Persistent chrome that stays composited while scrolling. */
+            body #top-bar,
+            body #send_form {
+                backdrop-filter: none !important;
+                -webkit-backdrop-filter: none !important;
+            }
+
+            /* background-attachment: fixed inside a scrolling list forces the
+               avatar layer to repaint on every frame. */
+            #sheld #chat .mes .mes_text::before {
+                background-attachment: scroll !important;
+            }
+
+            /* Transitions on elements that change constantly while a reply
+               streams in. */
+            body #send_form,
+            #sheld #chat .mes,
+            #sheld #chat .mes .mes_text,
+            #sheld #chat .mes .mes_block,
+            #sheld #chat .mes .avatar img {
+                transition: none !important;
+                animation: none !important;
+            }
+        `
+    },
+    {
     "type": "checkbox",
     "varId": "disableTopMenuAnimation",
     "displayText": t`Disable Top Menu Animations`,
