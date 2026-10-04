@@ -57,22 +57,51 @@ export function whenElementsAvailable(ids, handler) {
         return () => {};
     }
 
-    const pendingIds = () => ids.filter((id) => !document.getElementById(id));
+    const run = () => invokeGuardedHandler(handler, 'Moonlit Echoes element availability handler failed');
 
-    const observer = new MutationObserver(() => {
-        if (pendingIds().length === 0) {
-            observer.disconnect();
-            invokeGuardedHandler(handler, 'Moonlit Echoes element availability handler failed');
+    // Ids still missing. Resolved ones are dropped so each poll only looks for
+    // what is actually outstanding.
+    const pending = new Set(ids);
+    const resolvePending = () => {
+        for (const id of pending) {
+            if (document.getElementById(id)) {
+                pending.delete(id);
+            }
         }
-    });
+        return pending.size === 0;
+    };
 
-    if (pendingIds().length === 0) {
-        defer(() => invokeGuardedHandler(handler, 'Moonlit Echoes element availability handler failed'));
-    } else {
-        observer.observe(document.documentElement, { childList: true, subtree: true });
+    if (resolvePending()) {
+        defer(run);
+        return () => {};
     }
 
-    return () => observer.disconnect();
+    let observer = null;
+    let checkScheduled = false;
+
+    // Mutation batches arrive far faster than the DOM settles (once per streamed
+    // token), so collapse them into a single check per frame instead of running
+    // a lookup for every record.
+    const scheduleCheck = () => {
+        if (checkScheduled) return;
+        checkScheduled = true;
+        defer(() => {
+            checkScheduled = false;
+            if (resolvePending()) {
+                observer?.disconnect();
+                observer = null;
+                run();
+            }
+        });
+    };
+
+    observer = new MutationObserver(scheduleCheck);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    return () => {
+        observer?.disconnect();
+        observer = null;
+    };
 }
 
 function runDomReadyHandlers() {
